@@ -57,7 +57,8 @@ enum FileNodeCreator {
                 root[currentPath] = node
 
                 if let p = parent {
-                    p.children = (p.children ?? []) + [node]
+                    if p.children == nil { p.children = [] }
+                    p.children!.append(node)
                 } else {
                     topLevel.append(node)
                 }

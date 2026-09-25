@@ -1,6 +1,7 @@
 #include "Server.h"
 #include <FileInfo.h>
 #include <FolderInfo.h>
+#include <asio/impl/read_until.hpp>
 #include <asio/write.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -36,14 +37,14 @@ Server::~Server() {
 }
 
 void Server::startServer() {
-    if(thread.joinable()) {
+    if(serverThread.joinable()) {
         return;
     }
 
     std::promise<void> started;
     std::future<void> ready = started.get_future();
 
-    thread = std::thread([this, &started] {
+    serverThread = std::thread([this, &started] {
         try {
             std::cout << "Server listening on port 5555...\n";
             this->isServerRunning = true;
@@ -64,6 +65,15 @@ void Server::startServer() {
 }
 
 void Server::stopServer() {
+
+    json message = {
+        {"messageType", "serverClose"}
+    };
+    std::string messageStr = message.dump() + "\n";
+    for (auto& [_, client]: clients) {
+        asio::write(client, asio::buffer(messageStr));
+    }
+    
     this->isServerRunning = false;
 
     if (this->acceptor.is_open()) {
@@ -72,8 +82,8 @@ void Server::stopServer() {
 
     this->io.stop();
 
-    if (thread.joinable()) {
-        thread.join();
+    if (serverThread.joinable()) {
+        serverThread.join();
     }
 }
 
@@ -88,10 +98,15 @@ void Server::acceptClient() {
             }
 
             ClientIdentity identity = create_identity(client);
-            auto it = clients.find(identity);
-            if (it == clients.end()) {
-                this->clients.emplace(identity, std::move(client));
-                this->clientsConnected++;
+            auto [clientIt, clientInserted] = clients.emplace(
+                identity,
+                std::move(client)
+            );
+            
+            if (clientInserted) {
+                receiveBuffers.try_emplace(identity);
+                clientsConnected++;
+                this->listenToClient(identity);
             }
 
             acceptClient();
@@ -99,32 +114,70 @@ void Server::acceptClient() {
     );
 }
 
-struct ServerFile {
-    NodeType type;
-    std::uint32_t pathLength;
-    std::uint64_t sentBytes;
-    std::uint64_t totalBytes;
-};
+void Server::listenToClient(const ClientIdentity& identity) {
+
+    auto clientIt = clients.find(identity);
+    if (clientIt == clients.end()) {
+        return;
+    }
+    auto receiveBufferIt = receiveBuffers.find(identity);
+    if (receiveBufferIt == receiveBuffers.end()) {
+        return;
+    }
+    asio::ip::tcp::socket& client = clientIt->second;
+    asio::streambuf& receiveBuffer = receiveBufferIt->second; 
+    
+    asio::async_read_until(
+        client,
+        receiveBuffer,
+        "\n",
+        [this, identity, &receiveBuffer](const std::error_code& error, std::size_t) {
+            if (error) {
+                clients.erase(identity);
+                receiveBuffers.erase(identity);
+                clientsConnected--;
+                return;
+            }
+
+            auto& buffer = receiveBuffer;
+            std::istream stream(&buffer);
+
+            std::string message;
+            std::getline(stream, message);
+
+            std::cout << "Received: " << message << std::endl;
+
+            listenToClient(identity);
+        }
+    );
+}
 
 void Server::beginSendToClients(
     const fs::path& fullPath, 
     const std::vector<std::vector<BreadthFileNode>>& files
 ) {
+    /// if our fullPath is something like "Foo/"
+    /// SourceRoot will be "/Users/name/documents/Foo/"
+    const fs::path sourceRoot = fs::canonical(fullPath);
+    
+    const auto sourcePath = [&sourceRoot](const std::string& relativePath) {
+        fs::path relative(relativePath);
+        if (!relative.empty() && *relative.begin() == sourceRoot.filename()) {
+            relative = relative.lexically_relative(sourceRoot.filename());
+        }
+        return sourceRoot / relative;
+    };
 
     /// Send Starting Flag So Client Knows We're Starting
-    json startData = {
-        { "messageType", "start" }
-    };
-    std::string startPayload = startData.dump() + "\n";
-    for (auto& [_, client]: clients) {
-        asio::write(client, asio::buffer(startPayload));
-    }
+    this->sendStartPayload();
 
-    std::vector<std::vector<ServerFile>> serverFiles;
     for (const auto& level: files) {
-        std::vector<ServerFile> serverFileLevel;
         for (const auto& file: level) {
-            fs::path path = fullPath / fs::path(file.relativePath);
+            fs::path path = sourcePath(file.relativePath);
+
+            if (file.type == NodeType::file && !fs::is_regular_file(path)) {
+                throw std::runtime_error("file not found: " + path.string());
+            }
             std::uint32_t pathLength = static_cast<std::uint32_t>(file.relativePath.size());
             std::uint64_t sentBytes = 0;
             std::uint64_t totalBytes = FileInfo::size(path);
@@ -134,50 +187,20 @@ void Server::beginSendToClients(
                 sentBytes,
                 totalBytes
             };
-            serverFileLevel.push_back(serverFile);
-
-            /// Convert to json
-            json jsonData = {
-                { "messageType", "fileInfo" },
-                { "type", nodeTypeToString(serverFile.type) },
-                { "pathLength", serverFile.pathLength },
-                { "sentBytes", serverFile.sentBytes },
-                { "totalBytes", serverFile.totalBytes },
-                { "relativePath", file.relativePath }
-            };
-            std::string payload = jsonData.dump() + "\n";
-
-            /// Send To Client
-            for (auto& [_, client]: clients) {
-                asio::write(client, asio::buffer(payload));
-            }
+            sendInitialMetadata(serverFile, file);
         }
-        serverFiles.push_back(serverFileLevel);
     }
 
-    json doneData = {
-        {"messageType", "initialFileInfoMetadataDone" }
-    };
-
-    std::string donePayload = doneData.dump() + "\n";
-    for (auto& [_, client]: clients) {
-        asio::write(client, asio::buffer(donePayload));
-    }
-
-    json startingDataLoad = {
-        {"messageType", "startingDataLoad"}
-    };
-    std::string startingDataLoadPayload = startingDataLoad.dump() + "\n";
-    for (auto& [_, client]: clients) {
-        asio::write(client, asio::buffer(startingDataLoadPayload));
-    }
-
+    /// send the initial file info metadata done message
+    this->sendInitialFileInfoMetadataDone();
+    
     /// now we send the file data
     for (const auto& level: files) {
         std::unordered_map<fs::path, std::size_t> lastFileBuffer;
         std::unordered_map<fs::path, std::size_t> totalFileBuffer;
         std::unordered_map<fs::path, std::string> relativePaths;
-        constexpr size_t kChunkSize = 10;
+        // constexpr size_t kChunkSize = 64 * 1024;
+        constexpr size_t kChunkSize = 1024 * 1024;
         /// for a single level we store the path -> buffer
         /// first pass we populate lastFileBuffer and totalFileBuffer
         /// and we send the file data to the clients, next loop should
@@ -186,7 +209,7 @@ void Server::beginSendToClients(
             if (file.type == NodeType::folder) {
                 continue;
             }
-            fs::path path = file.relativePath;
+            fs::path path = sourcePath(file.relativePath);
             
             std::ifstream ifStreamFile(path, std::ios::binary);
             if (!ifStreamFile) {
@@ -221,17 +244,12 @@ void Server::beginSendToClients(
             lastFileBuffer[path] += bytesRead;
 
             /// now we send the data to the client
-            json jsonData = {
-                { "messageType", "fileData" },
-                { "relativePath", file.relativePath },
-                { "offset", offset },
-                { "bytesRead", bytesRead }
-            };
-            std::string payload = jsonData.dump() + "\n";
-            for (auto& [_, client]: clients) {
-                asio::write(client, asio::buffer(payload));
-                asio::write(client, asio::buffer(buffer));
-            }
+            this->sendFileData(
+                file.relativePath, 
+                offset, 
+                bytesRead, 
+                buffer
+            );
         }
 
         /// keep looping while at least one file still has bytes remaining
@@ -260,17 +278,13 @@ void Server::beginSendToClients(
     
                 lastFileBuffer[path] += bytesRead;
 
-                json jsonData = {
-                    { "messageType", "fileData" },
-                    { "relativePath", relativePaths[path] },
-                    { "offset", offset },
-                    { "bytesRead", bytesRead }
-                };
-                std::string payload = jsonData.dump() + "\n";
-                for (auto& [_, client]: clients) {
-                    asio::write(client, asio::buffer(payload));
-                    asio::write(client, asio::buffer(buffer));
-                }
+                /// we send the data to the client
+                this->sendFileData(
+                    relativePaths[path], 
+                    offset, 
+                    bytesRead, 
+                    buffer
+                );
             }
             
             anyFilesRemaining = anyFilesRemainingThisIteration;
@@ -278,13 +292,76 @@ void Server::beginSendToClients(
     }
 
     // send final file info metadata done message
-    doneData = {
+    sendMetadataDone();
+}
+
+/// Function sends the start payload to all the clients so they can clear any existing buffers
+/// and start receiving new data
+void Server::sendStartPayload() {
+    json startData = {
+        { "messageType", "start" }
+    };
+    std::string startPayload = startData.dump() + "\n";
+    for (auto& [_, client]: clients) {
+        asio::write(client, asio::buffer(startPayload));
+    }
+}
+
+/// Function sends the initial metadata of a file to all the clients
+void Server::sendInitialMetadata(ServerFile serverFile, BreadthFileNode file) {
+    /// Convert to json
+    json jsonData = {
+        { "messageType", "fileInfo" },
+        { "type", nodeTypeToString(serverFile.type) },
+        { "pathLength", serverFile.pathLength },
+        { "sentBytes", serverFile.sentBytes },
+        { "totalBytes", serverFile.totalBytes },
+        { "relativePath", file.relativePath }
+    };
+    std::string payload = jsonData.dump() + "\n";
+
+    /// Send To Client
+    for (auto& [_, client]: clients) {
+        asio::write(client, asio::buffer(payload));
+    }
+}
+
+void Server::sendInitialFileInfoMetadataDone() {
+    json doneData = {
+        {"messageType", "initialFileInfoMetadataDone" }
+    };
+    std::string donePayload = doneData.dump() + "\n";
+    for (auto& [_, client]: clients) {
+        asio::write(client, asio::buffer(donePayload));
+    }
+}
+
+void Server::sendFileData(
+    std::string relativePath,
+    std::size_t offset,
+    std::size_t bytesRead,
+    std::vector<uint8_t> buffer
+) {
+    /// now we send the data to the client
+    json jsonData = {
+        { "messageType", "fileData" },
+        { "relativePath", relativePath },
+        { "offset", offset },
+        { "bytesRead", bytesRead }
+    };
+    std::string payload = jsonData.dump() + "\n";
+    for (auto& [_, client]: clients) {
+        asio::write(client, asio::buffer(payload));
+        asio::write(client, asio::buffer(buffer));
+    }
+}
+
+void Server::sendMetadataDone() {
+    json doneData = {
         {"messageType", "finalFileInfoMetadataDone" }
     };
-    donePayload = doneData.dump() + "\n";
+    std::string donePayload = doneData.dump() + "\n";
     for (auto& [client, socket]: clients) {
         asio::write(socket, asio::buffer(donePayload));
     }
-
-    std::cout << "Sent File Info" << std::endl;
 }

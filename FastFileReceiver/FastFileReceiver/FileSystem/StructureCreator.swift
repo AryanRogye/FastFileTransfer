@@ -7,7 +7,7 @@
 
 import Foundation
 
-public final class StructureCreator {
+public nonisolated final class StructureCreator: Sendable {
 
     let directory: URL
 
@@ -18,7 +18,12 @@ public final class StructureCreator {
         self.directory = directory
     }
 
-    public func create(with serverFileInfo: [ServerFileInfo]) -> [ServerFileInfo: ServerFileInfo] {
+    @concurrent
+    public func createInBackground(with serverFileInfo: [ServerFileInfo]) async -> [ServerFileInfo: ServerFileInfo] {
+        create(with: serverFileInfo)
+    }
+
+    private func create(with serverFileInfo: [ServerFileInfo]) -> [ServerFileInfo: ServerFileInfo] {
         /// we'll create a UUID string
         let id = UUID().uuidString
         guard let rootFolder = serverFileInfo.first?.relativePath.split(separator: "/").first else {
@@ -56,6 +61,14 @@ public final class StructureCreator {
             return [:]
         }
 
+        // A directory only needs to be prepared once, even with thousands of siblings.
+        var createdDirectories: Set<URL> = [folderURL]
+        func ensureDirectory(_ url: URL) throws {
+            guard !createdDirectories.contains(url) else { return }
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            createdDirectories.insert(url)
+        }
+
         var result: [ServerFileInfo: ServerFileInfo] = [:]
         for i in 0..<modifiedServerFileInfos.count {
             let modifiedServerFileInfo = modifiedServerFileInfos[i]
@@ -65,25 +78,28 @@ public final class StructureCreator {
 
             if modifiedServerFileInfo.type == .folder {
                 do {
-                    try FileManager.default.createDirectory(
-                        at: url,
-                        withIntermediateDirectories: true
-                    )
+                    try ensureDirectory(url)
                 } catch {
                     print("Error Creating Directory: \(error.localizedDescription)")
                     try? FileManager.default.removeItem(at: folderURL)
                     return [:]
                 }
             } else if modifiedServerFileInfo.type == .file {
-                FileManager.default.createFile(
-                    atPath: url.path(),
-                    contents: nil,
-                )
+                do {
+                    try ensureDirectory(url.deletingLastPathComponent())
+                    guard FileManager.default.createFile(atPath: url.path(percentEncoded: false), contents: nil) else {
+                        throw CocoaError(.fileWriteUnknown)
+                    }
+                } catch {
+                    print("Error creating file \(url.path(percentEncoded: false)): \(error)")
+                    try? FileManager.default.removeItem(at: folderURL)
+                    return [:]
+                }
             }
         }
 
         var isDirectory: ObjCBool = false
-        if FileManager.default.fileExists(atPath: folderURL.path(), isDirectory: &isDirectory) {
+        if FileManager.default.fileExists(atPath: folderURL.path(percentEncoded: false), isDirectory: &isDirectory) {
             if !isDirectory.boolValue {
                 return [:]
             }

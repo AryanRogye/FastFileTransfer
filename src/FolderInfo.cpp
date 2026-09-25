@@ -1,7 +1,6 @@
 #include "FolderInfo.h"
 #include <cstddef>
 #include <filesystem>
-#include <iostream>
 #include <sys/fcntl.h>
 #include <vector>
 
@@ -77,10 +76,11 @@ std::vector<std::vector<BreadthFileNode>> FolderInfo::getLevels() const {
 }
 
 BreadthFileNode FolderInfo::generate() {
+    const std::string rootName = fs::canonical(folderPath).filename().string();
     BreadthFileNode node = {
-        folderPath.stem().string(),
+        rootName,
         NodeType::folder,
-        folderPath.stem().string()
+        rootName
     };
 
     this->levels.push_back({ node });

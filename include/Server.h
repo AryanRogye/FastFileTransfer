@@ -26,6 +26,13 @@ struct ClientIdentityHash {
     }
 };
 
+struct ServerFile {
+    NodeType type;
+    std::uint32_t pathLength;
+    std::uint64_t sentBytes;
+    std::uint64_t totalBytes;
+};
+
 class Server {
 public:
     std::atomic<bool> isServerRunning = false;
@@ -43,9 +50,22 @@ private:
     asio::io_context io;
     asio::ip::tcp::acceptor acceptor;
     std::unordered_map<ClientIdentity, asio::ip::tcp::socket, ClientIdentityHash> clients;
+    std::unordered_map<ClientIdentity, asio::streambuf, ClientIdentityHash> receiveBuffers;
 
-    std::thread thread;
+    std::thread serverThread;
 
+    void listenToClient(const ClientIdentity& identity);
+    
+    void sendStartPayload();
+    void sendInitialMetadata(ServerFile serverFile, BreadthFileNode file);
+    void sendInitialFileInfoMetadataDone();
+    void sendFileData(
+        std::string relativePath,
+        std::size_t offset,
+        std::size_t bytesRead,
+        std::vector<uint8_t> buffer
+    );
+    void sendMetadataDone();
 
     void acceptClient();
 };

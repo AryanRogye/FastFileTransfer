@@ -9,31 +9,22 @@ import SwiftUI
 
 struct ContentView: View {
 
-    @State private var client = Client()
+    @State private var client = ClientModel()
 
     var body: some View {
         NavigationStack {
             FileTransferOutlineView(store: client.fileTransferStore)
             .toolbar {
-                ToolbarItem(placement: .status) {
-                    if let type = client.lastMessageType {
-                        Text(type.rawValue)
-                    }
-                }
                 ToolbarItemGroup(placement: .primaryAction) {
-                    if client.isConnected {
-                        Image(systemName: "checkmark.circle")
+                    Button(action: client.toggleConnection) {
+                        Image(systemName: client.isConnected ? "checkmark.circle" : "xmark.circle")
                     }
-                    Button(action: { client.connect() }) {
-                        Image(systemName: "cable.connector.horizontal")
-                    }
-                    .disabled(client.isConnected)
                 }
             }
             .alert(isPresented: $client.showError) {
                 Alert(
                     title: Text("Error"),
-                    message: Text("\(client.connectionError, default: "Unknown Error")")
+                    message: Text("\(client.error, default: "Unknown Error")")
                 )
             }
         }
@@ -45,11 +36,31 @@ struct FileTransferOutlineView: View {
 
     var body: some View {
         List {
-            OutlineGroup(store.tree, id: \.id, children: \.children) { node in
-                FileRow(node: node)
+            ForEach(store.tree) { node in
+                FileNodeView(node: node)
             }
         }
         .listStyle(.plain)
+    }
+}
+
+struct FileNodeView: View {
+    let node: FileNode
+
+    @State private var isExpanded = true
+
+    var body: some View {
+        if node.isDirectory {
+            DisclosureGroup(isExpanded: $isExpanded) {
+                ForEach(node.children ?? []) { child in
+                    FileNodeView(node: child)
+                }
+            } label: {
+                FileRow(node: node)
+            }
+        } else {
+            FileRow(node: node)
+        }
     }
 }
 
@@ -63,16 +74,36 @@ struct FileRow: View {
             Text(node.name)
             Spacer()
             if let box = node.box, box.current.type == .file {
-                ProgressView(
-                    value: Double(min(box.current.sentBytes, box.current.totalBytes)),
-                    total: Double(max(box.current.totalBytes, 1))
-                )
-                .frame(width: 60)
+                FileProgressView(box: box)
             }
         }
     }
 }
 
+private struct FileProgressView: View {
+    let box: ServerFileInfoBox
+
+    var body: some View {
+        let sent = box.current.sentBytes
+        let total = box.current.totalBytes
+        let isComplete = box.transferFinished
+
+        VStack(alignment: .trailing, spacing: 2) {
+            ProgressView(
+                value: isComplete ? 1 : Double(sent) / Double(max(total, 1))
+            )
+                .progressViewStyle(.linear)
+                .tint(isComplete ? .green : .blue)
+                .frame(width: 80)
+            Text(box.transferError ?? (isComplete ? "Complete" : "\(sent) / \(total) bytes"))
+                .font(.caption2)
+                .foregroundStyle(box.transferError == nil ? Color.secondary : Color.red)
+        }
+    }
+}
+
 #Preview {
-    ContentView()
+    NavigationStack {
+        ContentView()
+    }
 }
