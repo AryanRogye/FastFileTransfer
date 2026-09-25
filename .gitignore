@@ -1,0 +1,17 @@
+# Generated CMake files and local build output
+/build/
+/cmake-build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/compile_commands.json
+
+# Local editor and compiler caches
+.cache/
+.DS_Store
+
+# Xcode user settings and generated output
+xcuserdata/
+*.xcuserstate
+DerivedData/
+.build/
+.swiftpm/
