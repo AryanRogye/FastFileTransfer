@@ -34,6 +34,11 @@ final class ClientModel {
     @ObservationIgnored
     private(set) var serverFileInfo: [ServerFileInfo] = []
 
+    @ObservationIgnored
+    private var heartbeatTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var connectionGeneration: UInt64 = 0
+
     private enum ReceiveState {
         case json
         case fileData(
@@ -50,14 +55,30 @@ final class ClientModel {
 
     public func toggleConnection() {
         if isConnected {
-            client.disconnect()
-            isConnected = false
+            disconnect()
         } else {
             connect()
         }
     }
 
+    private func disconnect(stopHeartbeat: Bool = true) {
+        if stopHeartbeat {
+            heartbeatTask?.cancel()
+            heartbeatTask = nil
+        }
+        connectionGeneration &+= 1
+        client.disconnect()
+        isConnected = false
+        currentBuffer.removeAll()
+        receiveState = .json
+        serverFileInfo.removeAll()
+        fileTransferStore.clear()
+    }
+
     private func connect() {
+        guard !isConnected else { return }
+        connectionGeneration &+= 1
+        let generation = connectionGeneration
         currentBuffer.removeAll()
         receiveState = .json
         client.connect(
@@ -65,17 +86,46 @@ final class ClientModel {
             port: 5555,
             completionHandler: { connected, error in
                 Task { @MainActor in
+                    guard generation == self.connectionGeneration else { return }
                     self.isConnected = connected
                     if let error {
                         self.error = error.localizedDescription
                         self.showError = true
+                        self.disconnect(stopHeartbeat: false)
                     }
                 }
             },
             withOnReceiveData: { [weak self] data, error in
-                await self?.parseReceiveBuffer(with: data, error: error)
+                await self?.receive(data, error: error, generation: generation)
             }
         )
+        startHeartbeat()
+    }
+
+    private func receive(_ data: Data, error: Error?, generation: UInt64) async {
+        guard generation == connectionGeneration else { return }
+        await parseReceiveBuffer(with: data, error: error)
+    }
+
+    private func startHeartbeat() {
+        guard heartbeatTask == nil else { return }
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(5))
+                    try Task.checkCancellation()
+                    guard let self else { return }
+                    if !self.isConnected {
+                        self.connect()
+                        print("Heartbeat")
+                    }
+                } catch is CancellationError {
+                } catch {
+                    print("Exit Hearbeat: \(error.localizedDescription)")
+                    return
+                }
+            }
+        }
     }
 }
 
@@ -85,14 +135,21 @@ extension ClientModel {
         self.currentBuffer.append(data)
 
         if let error {
-            self.isConnected = false
+            let hadNoFiles = fileTransferStore.relativePaths.isEmpty
             let hasIncompleteFiles = fileTransferStore.relativePaths.values.contains {
                 $0.current.type == .file && !$0.transferFinished
             }
-            if fileTransferStore.relativePaths.isEmpty || hasIncompleteFiles {
-                self.error = error.localizedDescription
-                self.showError = true
-                fileTransferStore.failIncompleteTransfer(reason: error.localizedDescription)
+            disconnect(stopHeartbeat: false)
+            if hadNoFiles || hasIncompleteFiles {
+                if let e = error as? Client.ClientError {
+                    switch e {
+                    case .cancelled, .invalidPort:
+                        self.error = error.localizedDescription
+                        self.showError = true
+                    case .connectionClosed:
+                        return
+                    }
+                }
             }
             return
         }
@@ -188,8 +245,7 @@ extension ClientModel {
             case .serverClose:
                 self.error = "Server Closed"
                 self.showError = true
-                isConnected = false
-                client.disconnect()
+                disconnect(stopHeartbeat: false)
             }
         } catch {
             print("JSON decode failed:", error)

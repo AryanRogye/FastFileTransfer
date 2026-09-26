@@ -42,6 +42,11 @@ final class FileTransferStore {
         self.fileWriter = FileWriter(directory: directory)
     }
 
+    func clear() {
+        self.relativePaths.removeAll()
+        self.tree.removeAll()
+    }
+
     func register(_ mapping: [ServerFileInfo: ServerFileInfo]) {
         for (original, modified) in mapping {
             let box = ServerFileInfoBox(modified)

@@ -2,6 +2,8 @@
 #include <FileInfo.h>
 #include <FolderInfo.h>
 #include <asio/impl/read_until.hpp>
+#include <asio/signal_set.hpp>
+#include <asio/socket_base.hpp>
 #include <asio/write.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +15,7 @@
 #include <nlohmann/json.hpp>
 #include <stddef.h>
 #include <stdexcept>
+#include <system_error>
 #include <unordered_map>
 #include <vector>
 
@@ -27,10 +30,7 @@ ClientIdentity create_identity(const asio::ip::tcp::socket& client) {
     return identity;
 }
 
-Server::Server(): acceptor(
-    io,
-    asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 5555)
-) {}
+Server::Server(): acceptor(io) {}
 
 Server::~Server() {
     this->stopServer();
@@ -40,6 +40,17 @@ void Server::startServer() {
     if(serverThread.joinable()) {
         return;
     }
+
+    asio::ip::tcp::endpoint endpoint(
+        asio::ip::tcp::v4(),
+        5555
+    );
+
+    acceptor.open(endpoint.protocol());
+
+    acceptor.set_option(asio::socket_base::reuse_address(true));
+    acceptor.bind(endpoint);
+    acceptor.listen();
 
     std::promise<void> started;
     std::future<void> ready = started.get_future();
@@ -178,9 +189,11 @@ void Server::beginSendToClients(
             if (file.type == NodeType::file && !fs::is_regular_file(path)) {
                 throw std::runtime_error("file not found: " + path.string());
             }
+            if (!file.size.has_value()) continue;
             std::uint32_t pathLength = static_cast<std::uint32_t>(file.relativePath.size());
             std::uint64_t sentBytes = 0;
-            std::uint64_t totalBytes = FileInfo::size(path);
+            std::uint64_t totalBytes = file.size.value();
+            
             ServerFile serverFile = {
                 file.type,
                 pathLength,

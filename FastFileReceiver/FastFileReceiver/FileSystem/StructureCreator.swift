@@ -23,7 +23,7 @@ public nonisolated final class StructureCreator: Sendable {
         create(with: serverFileInfo)
     }
 
-    private func create(with serverFileInfo: [ServerFileInfo]) -> [ServerFileInfo: ServerFileInfo] {
+    public func create(with serverFileInfo: [ServerFileInfo]) -> [ServerFileInfo: ServerFileInfo] {
         /// we'll create a UUID string
         let id = UUID().uuidString
         guard let rootFolder = serverFileInfo.first?.relativePath.split(separator: "/").first else {

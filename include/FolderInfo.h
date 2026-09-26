@@ -1,7 +1,9 @@
 #ifndef FOLDER_INFO_H
 #define FOLDER_INFO_H
 
+#include <cstdint>
 #include <filesystem>
+#include <optional>
 
 namespace fs = std::filesystem;
 
@@ -23,6 +25,7 @@ struct BreadthFileNode {
     std::string name;
     NodeType type;
     std::string relativePath;
+    std::optional<std::uint64_t> size;
 };
 
 class FolderInfo {

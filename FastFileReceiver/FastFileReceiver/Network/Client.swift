@@ -56,7 +56,7 @@ final class Client {
 
     private var didDisconnect: Bool = true
 
-    private enum ClientError: LocalizedError {
+    enum ClientError: LocalizedError {
         case invalidPort
         case cancelled
         case connectionClosed
@@ -103,17 +103,32 @@ final class Client {
 
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
+
             switch state {
             case .ready:
                 completionHandler(true, nil)
                 receiveData()
-            case .failed(let reason):
+
+            case .failed(let error):
                 if didDisconnect { return }
-                completionHandler(false, reason)
+                completionHandler(false, error)
+
             case .cancelled:
                 if didDisconnect { return }
                 completionHandler(false, ClientError.cancelled)
-            default:
+
+            case .waiting(let error):
+                if let nsError = error as NSError?, nsError.domain == NSPOSIXErrorDomain, nsError.code == Int(ECONNREFUSED) {
+                    completionHandler(false, nil)
+                }
+
+            case .setup:
+                print("Setting up connection")
+
+            case .preparing:
+                print("Preparing connection")
+
+            @unknown default:
                 break
             }
         }

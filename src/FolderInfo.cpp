@@ -1,8 +1,11 @@
 #include "FolderInfo.h"
+#include <FileInfo.h>
 #include <cstddef>
 #include <filesystem>
+#include <optional>
 #include <sys/fcntl.h>
 #include <vector>
+#include <iostream>
 
 struct PathInfo {
     fs::path path;
@@ -29,15 +32,18 @@ std::vector<PathInfo> parse(
             BreadthFileNode folderNode = {
                 name,
                 NodeType::folder,
-                fullPath
+                fullPath,
+                std::nullopt
             };
             level.push_back(folderNode);
         }
         if (fs::is_regular_file(entry)) {
+            std::uint64_t totalBytes = FileInfo::size(entry.path());
             BreadthFileNode fileNode = {
                 name,
                 NodeType::file,
-                fullPath
+                fullPath,
+                totalBytes
             };
             level.push_back(fileNode);
         }
@@ -80,7 +86,8 @@ BreadthFileNode FolderInfo::generate() {
     BreadthFileNode node = {
         rootName,
         NodeType::folder,
-        rootName
+        rootName,
+        std::nullopt
     };
 
     this->levels.push_back({ node });
@@ -92,7 +99,7 @@ BreadthFileNode FolderInfo::generate() {
 
     // for(std::size_t i = 0; i < levels.size(); i++) {
     //     for (std::size_t j = 0; j < levels[i].size(); j++) {
-    //         std::cout << "[" << i << "] " << levels[i][j].relativePath << std::endl;
+    //         std::cout << "[" << i << "] " << levels[i][j].relativePath << " size: " << (levels[i][j].size.has_value() ? std::to_string(levels[i][j].size.value()) : "null") << std::endl;
     //     }
     // }
 
